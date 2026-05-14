@@ -1,8 +1,8 @@
+// mhrv-rs exit node — Deno Deploy version
 
-const PSK = "f509fc0ac7e786bb90f9209ad7c821eff4763be5394376d3e0db3fc246055f7a";
+const PSK =
+  "f509fc0ac7e786bb90f9209ad7c821eff4763be5394376d3e0db3fc246055f7a";
 
-// Headers the client may send that must NOT be forwarded to the
-// destination — they're hop-by-hop or would break re-encoding.
 const STRIP_HEADERS = new Set([
   "host",
   "connection",
@@ -28,13 +28,15 @@ function decodeBase64ToBytes(input: string): Uint8Array {
 
 function encodeBytesToBase64(bytes: Uint8Array): string {
   let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i++)
+    bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 
 function sanitizeHeaders(h: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (!h || typeof h !== "object") return out;
+
   for (const [k, v] of Object.entries(h as Record<string, unknown>)) {
     if (!k) continue;
     if (STRIP_HEADERS.has(k.toLowerCase())) continue;
@@ -43,21 +45,18 @@ function sanitizeHeaders(h: unknown): Record<string, string> {
   return out;
 }
 
-export default async function (req: Request): Promise<Response> {
-  // Fail closed on the placeholder PSK so a fresh deploy without setup
-  // can't accidentally serve as an open relay.
-  if (PSK === "CHANGE_ME_TO_A_STRONG_SECRET") {
-    return Response.json(
-      {
-        e:
-          "exit_node misconfigured: PSK is still the placeholder. Set " +
-          "a strong secret in the source before deploying.",
-      },
-      { status: 503 },
-    );
-  }
-
+Deno.serve(async (req) => {
   try {
+    if (PSK === "CHANGE_ME_TO_A_STRONG_SECRET") {
+      return Response.json(
+        {
+          e:
+            "exit_node misconfigured: PSK is still placeholder",
+        },
+        { status: 503 }
+      );
+    }
+
     if (req.method !== "POST") {
       return Response.json({ e: "method_not_allowed" }, { status: 405 });
     }
@@ -76,24 +75,26 @@ export default async function (req: Request): Promise<Response> {
     if (k !== PSK) {
       return Response.json({ e: "unauthorized" }, { status: 401 });
     }
+
     if (!/^https?:\/\//i.test(u)) {
       return Response.json({ e: "bad url" }, { status: 400 });
     }
 
-    // Loop guard: if u points at this exit node's own host, refuse.
-    // Without this, a misconfigured client could chain exit-node →
-    // exit-node → exit-node → ... and burn the host's runtime budget.
     try {
       const reqUrl = new URL(req.url);
       const dstUrl = new URL(u);
+
       if (
         reqUrl.host === dstUrl.host &&
         reqUrl.protocol === dstUrl.protocol
       ) {
-        return Response.json({ e: "exit-node loop refused" }, { status: 400 });
+        return Response.json(
+          { e: "exit-node loop refused" },
+          { status: 400 }
+        );
       }
     } catch {
-      // Malformed URL — let the fetch below 400.
+      // ignore URL parse errors
     }
 
     let payload: Uint8Array | undefined;
@@ -108,20 +109,16 @@ export default async function (req: Request): Promise<Response> {
       redirect: "manual",
     });
 
-    // `fetch()` (Deno / Bun / Node) auto-decompresses gzip / br / deflate
-    // responses, so `resp.arrayBuffer()` returns plain bytes — but the
-    // destination's `Content-Encoding` header is still on `resp.headers`.
-    // Forwarding it would tell the client browser "this body is gzipped"
-    // when it isn't, producing `Content Encoding Error` (#964). Same goes
-    // for `Content-Length` — the post-decompression byte count is
-    // different from what the destination announced. Strip both. The
-    // Apps Script + Rust transport layer below us re-frames the wire body
-    // anyway, so neither header is meaningful to forward.
     const data = new Uint8Array(await resp.arrayBuffer());
+
     const respHeaders: Record<string, string> = {};
     resp.headers.forEach((value, key) => {
       const lower = key.toLowerCase();
-      if (lower === "content-encoding" || lower === "content-length") return;
+      if (
+        lower === "content-encoding" ||
+        lower === "content-length"
+      )
+        return;
       respHeaders[key] = value;
     });
 
@@ -134,4 +131,4 @@ export default async function (req: Request): Promise<Response> {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ e: message }, { status: 500 });
   }
-}
+});
